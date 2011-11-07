@@ -57,6 +57,13 @@ module MCollective
                 topic = Util.make_target(agent, :reply, collective)
                 Log.debug("Subscribing to #{topic}")
 
+                require 'pp'
+                mysubs = @subscriptions.pretty_inspect
+                stompsubs = PluginManager["connector_plugin"].connection.instance_variable_get("@subscriptions").pretty_inspect
+
+                Log.debug("MC::Client subscriptions are: #{mysubs}")
+                Log.debug("Stomp subscriptions are: #{stompsubs}")
+
                 Util.subscribe(topic)
                 @subscriptions[agent] = 1
             end
@@ -80,10 +87,14 @@ module MCollective
             begin
                 msg = @connection.receive
 
-                msg = @security.decodemsg(msg)
+                # PE specific behavior to tell the security plugin what message ID we are waiting for
+                # so that we can quickly bail out before doing a ton of decryption work for miss directed
+                # messages
+                msg = @security.decodemsg(msg, requestid)
 
                 msg[:senderid] = Digest::MD5.hexdigest(msg[:senderid]) if ENV.include?("MCOLLECTIVE_ANON")
 
+                Log.debug("Got a reply with id '#{msg[:requestid]}' from #{msg[:senderid]} expected #{requestid}") if msg[:requestid] != requestid
                 raise(MsgDoesNotMatchRequestID, "Message reqid #{requestid} does not match our reqid #{msg[:requestid]}") if msg[:requestid] != requestid
             rescue SecurityValidationFailed => e
                 Log.warn("Ignoring a message that did not pass security validations")
@@ -112,10 +123,18 @@ module MCollective
                     end
                 end
             rescue Timeout::Error => e
-                hosts.sort
             rescue Exception => e
                 raise
             end
+
+            if @subscriptions.include?("discover")
+              topic = Util.make_target("discover", :reply, collective)
+              Log.debug("Unsubscribing from #{topic}")
+              Util.unsubscribe(topic)
+              @subscriptions.delete("discover")
+            end
+
+            return hosts.sort
         end
 
         # Send a request, performs the passed block for each response
@@ -151,6 +170,13 @@ module MCollective
                 end
             rescue Interrupt => e
             rescue Timeout::Error => e
+            end
+
+            if @subscriptions.include?(agent)
+              topic = Util.make_target(agent, :reply, collective)
+              Log.debug("Unsubscribing from #{topic}")
+              Util.unsubscribe(topic)
+              @subscriptions.delete(agent)
             end
 
             stat[:totaltime] = Time.now.to_f - stat[:starttime]
